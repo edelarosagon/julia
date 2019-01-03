@@ -195,10 +195,20 @@ cd(@__DIR__) do
         isa(e, InterruptException) || rethrow()
         # If the test suite was merely interrupted, still print the
         # summary, which can be useful to diagnose what's going on
-        foreach(task->try; schedule(task, InterruptException(); error=true); catch; end, all_tasks)
+        foreach(task -> begin
+                istaskstarted(task) || return
+                istaskdone(task) && return
+                try
+                    task.queue === nothing || Base.list_deletefirst!(task.queue, task)
+                    schedule(task, InterruptException(); error=true)
+                catch ex
+                    @error "InterruptException" exception=ex,catch_backtrace()
+                end
+            end, all_tasks)
         foreach(wait, all_tasks)
     finally
         if @isdefined stdin_monitor
+            stdin_monitor.queue === nothing || Base.list_deletefirst!(stdin_monitor.queue, stdin_monitor)
             schedule(stdin_monitor, InterruptException(); error=true)
         end
     end

@@ -174,6 +174,7 @@ let r, t
         return true
     end
     yield()
+    t.queue === nothing || Base.list_deletefirst!(t.queue, t)
     schedule(t, InterruptException(), error=true)
     yield()
     put!(r, 11)

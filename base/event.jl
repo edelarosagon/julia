@@ -56,12 +56,12 @@ Abstract implementation of a condition object
 for synchonizing tasks objects with a given lock.
 """
 struct GenericCondition{L<:AbstractLock}
-    waitq::Vector{Any}
+    waitq::InvasiveLinkedList{Task}
     lock::L
 
-    GenericCondition{L}() where {L<:AbstractLock} = new{L}([], L())
-    GenericCondition{L}(l::L) where {L<:AbstractLock} = new{L}([], l)
-    GenericCondition(l::AbstractLock) = new{typeof(l)}([], l)
+    GenericCondition{L}() where {L<:AbstractLock} = new{L}(InvasiveLinkedList{Task}(), L())
+    GenericCondition{L}(l::L) where {L<:AbstractLock} = new{L}(InvasiveLinkedList{Task}(), l)
+    GenericCondition(l::AbstractLock) = new{typeof(l)}(InvasiveLinkedList{Task}(), l)
 end
 
 assert_havelock(c::GenericCondition) = assert_havelock(c.lock)
@@ -94,11 +94,10 @@ function wait(c::GenericCondition)
     assert_havelock(c)
     push!(c.waitq, ct)
     token = unlockall(c.lock)
-
     try
         return wait()
     catch
-        filter!(x->x!==ct, c.waitq)
+        list_deletefirst!(c.waitq, ct)
         rethrow()
     finally
         relockall(c.lock, token)
@@ -118,16 +117,11 @@ notify(c::GenericCondition, @nospecialize(arg = nothing); all=true, error=false)
 function notify(c::GenericCondition, @nospecialize(arg), all, error)
     assert_havelock(c)
     cnt = 0
-    if all
-        cnt = length(c.waitq)
-        for t in c.waitq
-            schedule(t, arg, error=error)
-        end
-        empty!(c.waitq)
-    elseif !isempty(c.waitq)
-        cnt = 1
+    while !isempty(c.waitq)
         t = popfirst!(c.waitq)
         schedule(t, arg, error=error)
+        cnt += 1
+        all || break
     end
     return cnt
 end
@@ -163,7 +157,8 @@ const Condition = GenericCondition{AlwaysLockedST}
 
 ## scheduler and work queue
 
-global const Workqueue = Task[]
+global const Workqueue = InvasiveLinkedList{Task}()
+#global const Workqueue = Task[]
 
 function enq_work(t::Task)
     t.state == :runnable || error("schedule: Task not runnable")
@@ -299,8 +294,7 @@ function ensure_rescheduled(othertask::Task)
         # if the current task was queued,
         # also need to return it to the runnable state
         # before throwing an error
-        i = findfirst(t->t===ct, Workqueue)
-        i === nothing || deleteat!(Workqueue, i)
+        list_deletefirst!(Workqueue, ct)
         ct.state = :runnable
     end
     nothing
