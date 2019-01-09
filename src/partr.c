@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #ifdef JULIA_ENABLE_THREADING
+#ifdef JULIA_ENABLE_PARTR
 
 // GC functions used
 extern int jl_gc_mark_queue_obj_explicit(jl_gc_mark_cache_t *gc_cache,
@@ -348,10 +349,6 @@ void jl_init_threadinginfra(void)
 }
 
 
-// initialize the thread function argument
-void jl_init_threadarg(jl_threadarg_t *targ) { }
-
-
 // helper for final thread initialization
 static void init_started_thread(void)
 {
@@ -601,6 +598,11 @@ void jl_gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp
     }
 }
 
+#else
+void jl_init_threadinginfra(void) { }
+void jl_threadfun(void *arg) { abort(); }
+void jl_task_done_hook_partr(jl_task_t *task) { }
+#endif
 #endif // JULIA_ENABLE_THREADING
 
 #ifdef __cplusplus

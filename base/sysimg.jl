@@ -314,9 +314,9 @@ include("env.jl")
 include("libuv.jl")
 include("linked_list.jl")
 include("event.jl")
-include("task.jl")
 include("threads.jl")
 include("lock.jl")
+include("task.jl")
 include("weakkeydict.jl")
 
 # Logging
@@ -464,6 +464,7 @@ function __init__()
     # for the few uses of Libc.rand in Base:
     Libc.srand()
     # Base library init
+    init_tasks()
     reinit_stdio()
     Multimedia.reinit_displays() # since Multimedia.displays uses stdout as fallback
     # initialize loading

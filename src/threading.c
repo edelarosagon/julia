@@ -470,7 +470,6 @@ void jl_start_threads(void)
         jl_threadarg_t *t = (jl_threadarg_t*)malloc(sizeof(jl_threadarg_t)); // ownership will be passed to the thread
         t->tid = i;
         t->barrier = &thread_init_done;
-        jl_init_threadarg(t);
         uv_thread_create(&uvtid, jl_threadfun, t);
         if (exclusive) {
             mask[i] = 1;

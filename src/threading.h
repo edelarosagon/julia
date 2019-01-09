@@ -26,7 +26,6 @@ void jl_init_threadtls(int16_t tid);
 
 // provided by a threading infrastructure
 void jl_init_threadinginfra(void);
-void jl_init_threadarg(jl_threadarg_t *targ);
 void jl_threadfun(void *arg);
 
 #ifdef __cplusplus
