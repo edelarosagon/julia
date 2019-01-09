@@ -276,6 +276,7 @@ static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
         if (lastt->copy_stack) { // save the old copy-stack
             save_stack(ptls, lastt, pt); // allocates (gc-safepoint, and can also fail)
             if (jl_setjmp(lastt->ctx.uc_mcontext, 0)) {
+                // TODO: mutex unlock the thread we just switched from
 #ifdef ENABLE_TIMINGS
                 assert(blk == ptls->current_task->timing_stack);
                 if (blk)
@@ -296,6 +297,10 @@ static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
     ptls->world_age = t->world_age;
     t->gcstack = NULL;
     ptls->current_task = t;
+    if (!lastt->copy_stack)
+        // release lastt to run on any tid
+        lastt->tid = -1;
+    t->tid = ptls->tid;
 
     jl_ucontext_t *lastt_ctx = (killed ? NULL : &lastt->ctx);
 #ifdef COPY_STACKS
@@ -326,6 +331,7 @@ static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
     else {
         jl_start_fiber(lastt_ctx, &t->ctx);
     }
+    // TODO: mutex unlock the thread we just switched from
 #ifdef ENABLE_TIMINGS
     assert(blk == ptls->current_task->timing_stack);
     if (blk)
@@ -488,11 +494,11 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
     t->logstate = ptls->current_task->logstate;
     // there is no active exception handler available on this stack yet
     t->eh = NULL;
-    t->tid = 0;
+    // permit execution on any thread
+    t->tid = -1;
     t->gcstack = NULL;
     t->excstack = NULL;
     t->stkbuf = NULL;
-    t->tid = 0;
     t->started = 0;
 #ifdef ENABLE_TIMINGS
     t->timing_stack = NULL;
