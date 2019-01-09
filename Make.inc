@@ -996,7 +996,7 @@ OSLIBS += -Wl,--version-script=$(JULIAHOME)/src/julia.expmap
 endif
 endif
 endif
-JLDFLAGS := -Wl,-Bdynamic
+JLDFLAGS := -Wl,-Bdynamic -Wl,-no-undefined
 ifeq (-Bsymbolic-functions, $(shell $(LD) --help | grep -o -e "-Bsymbolic-functions"))
 JLIBLDFLAGS := -Wl,-Bsymbolic-functions
 else
@@ -1007,7 +1007,7 @@ JLIBLDFLAGS :=
 endif
 
 ifeq ($(OS), FreeBSD)
-JLDFLAGS := -Wl,-Bdynamic
+JLDFLAGS := -Wl,-Bdynamic -Wl,-no-undefined
 OSLIBS += -lelf -lkvm -lrt
 
 # Tweak order of libgcc_s in DT_NEEDED,
