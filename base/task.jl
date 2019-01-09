@@ -184,11 +184,18 @@ end
 function wait(t::Task)
     if !istaskdone(t)
         if t.donenotify === nothing
-            t.donenotify = Condition()
+            # TODO: needs atomic_cas, or a lock
+            # TODO: should this use the StickyWorkqueue type instead (same fields, different API)?
+            t.donenotify = GenericCondition{Threads.SpinLock}()
         end
-    end
-    while !istaskdone(t)
-        wait(t.donenotify)
+        lock(t.donenotify)
+        try
+            while !istaskdone(t)
+                wait(t.donenotify)
+            end
+        finally
+            unlock(t.donenotify)
+        end
     end
     if istaskfailed(t)
         throw(t.exception)
@@ -275,7 +282,7 @@ end
 function register_taskdone_hook(t::Task, hook)
     tls = get_task_tls(t)
     push!(get!(tls, :TASKDONE_HOOKS, []), hook)
-    t
+    return t
 end
 
 # runtime system hook called when a task finishes
@@ -288,9 +295,17 @@ function task_done_hook(t::Task)
         t.backtrace = catch_backtrace()
     end
 
-    if isa(t.donenotify, Condition) && !isempty(t.donenotify.waitq)
-        handled = true
-        notify(t.donenotify, result, true, err)
+    donenotify = t.donenotify
+    if isa(donenotify, GenericCondition{Threads.SpinLock})
+        lock(donenotify)
+        try
+            if !isempty(donenotify.waitq)
+                handled = true
+                notify(donenotify, result, true, err)
+            end
+        finally
+            unlock(donenotify)
+        end
     end
 
     # Execute any other hooks registered in the TLS
@@ -300,8 +315,8 @@ function task_done_hook(t::Task)
         handled = true
     end
 
-    if err && !handled
-        if isa(result,InterruptException) && isdefined(Base,:active_repl_backend) &&
+    if err && !handled && Threads.threadid() == 1
+        if isa(result, InterruptException) && isdefined(Base, :active_repl_backend) &&
             active_repl_backend.backend_task.state == :runnable && isempty(Workqueue) &&
             active_repl_backend.in_eval
             throwto(active_repl_backend.backend_task, result) # this terminates the task
@@ -315,7 +330,8 @@ function task_done_hook(t::Task)
         # If an InterruptException happens while blocked in the event loop, try handing
         # the exception to the REPL task since the current task is done.
         # issue #19467
-        if isa(e,InterruptException) && isdefined(Base,:active_repl_backend) &&
+        if Threads.threadid() == 1 &&
+            isa(e, InterruptException) && isdefined(Base, :active_repl_backend) &&
             active_repl_backend.backend_task.state == :runnable && isempty(Workqueue) &&
             active_repl_backend.in_eval
             throwto(active_repl_backend.backend_task, e)
@@ -416,7 +432,7 @@ global const Workqueues = [StickyWorkqueue()]
 global const Workqueue = Workqueues[1] # default work queue is thread 1
 function init_tasks()
     if length(Workqueues) < Threads.nthreads()
-        lock(Workqueue.lock)
+        lock(Workqueue.lock) # FIXME: need to kill this lock
         if length(Workqueues) < Threads.nthreads()
             resize!(Workqueues, Threads.nthreads())
             for i = 2:length(Workqueues)
