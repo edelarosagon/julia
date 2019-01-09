@@ -157,12 +157,71 @@ const Condition = GenericCondition{AlwaysLockedST}
 
 ## scheduler and work queue
 
-global const Workqueue = InvasiveLinkedList{Task}()
+struct InvasiveLinkedListSynchronized{T}
+    queue::InvasiveLinkedList{T}
+    lock::Threads.SpinLock
+    InvasiveLinkedListSynchronized{T}() = new(InvasiveLinkedList{T}(), Threads.SpinLock())
+end
+isempty(W::InvasiveLinkedListSynchronized) = isempty(W.queue)
+function push!(W::InvasiveLinkedListSynchronized{T}, t::T) where T
+    lock(W.lock)
+    try
+        push!(W.queue, t)
+    finally
+        unlock(W.lock)
+    end
+    return W
+end
+function pushfirst!(W::InvasiveLinkedListSynchronized{T}, t::T) where T
+    lock(W.lock)
+    try
+        pushfirst!(W.queue, t)
+    finally
+        unlock(W.lock)
+    end
+    return W
+end
+function pop!(W::InvasiveLinkedListSynchronized)
+    lock(W.lock)
+    try
+        return pop!(W.queue)
+    finally
+        unlock(W.lock)
+    end
+end
+function popfirst!(W::InvasiveLinkedListSynchronized)
+    lock(W.lock)
+    try
+        return popfirst!(W.queue)
+    finally
+        unlock(W.lock)
+    end
+end
+function list_delete!(W::InvasiveLinkedListSynchronized{T}, t::T) where T
+    lock(W.lock)
+    try
+        list_delete!(W.queue, t)
+    finally
+        unlock(W.lock)
+    end
+    return W
+end
+
+const StickyWorkqueue = InvasiveLinkedListSynchronized{Task}
+global const Workqueues = [StickyWorkqueue()]
+global const Workqueue = Workqueues[1] # default work queue is thread 1
+function __init__()
+    resize!(Workqueues, nthreads())
+    for i = 2:length(Workqueues)
+        Workqueues[i] = StickyWorkqueue()
+    end
+    nothing
+end
 
 function enq_work(t::Task)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
     ccall(:uv_stop, Cvoid, (Ptr{Cvoid},), eventloop())
-    push!(Workqueue, t)
+    push!(Workqueues[threadid()], t)
     return t
 end
 
@@ -212,11 +271,12 @@ end
 # fast version of `schedule(t, arg); wait()`
 function schedule_and_wait(t::Task, @nospecialize(arg)=nothing)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
-    if isempty(Workqueue)
+    W = Workqueues[threadid()]
+    if isempty(W)
         return yieldto(t, arg)
     else
         t.result = arg
-        push!(Workqueue, t)
+        push!(W, t)
     end
     return wait()
 end
@@ -281,22 +341,21 @@ end
 
 function ensure_rescheduled(othertask::Task)
     ct = current_task()
+    W = Workqueues[threadid()]
     if ct !== othertask && othertask.state == :runnable
         # we failed to yield to othertask
         # return it to the head of the queue to be scheduled later
-        pushfirst!(Workqueue, othertask)
+        pushfirst!(W, othertask)
     end
-    if ct.queue === Workqueue
-        # if the current task was queued,
-        # also need to return it to the runnable state
-        # before throwing an error
-        list_deletefirst!(Workqueue, ct)
-    end
+    # if the current task was queued,
+    # also need to return it to the runnable state
+    # before throwing an error
+    list_deletefirst!(W, ct)
     nothing
 end
 
-@noinline function poptask()
-    t = popfirst!(Workqueue)
+@noinline function poptask(W::StickyWorkqueue)
+    t = popfirst!(W)
     if t.state != :runnable
         # assume this somehow got queued twice,
         # probably broken now, but try discarding this switch and keep going
@@ -310,16 +369,17 @@ end
 end
 
 function wait()
+    W = Workqueues[threadid()]
     while true
-        if isempty(Workqueue)
+        if isempty(W)
             c = process_events(true)
-            if c == 0 && eventloop() != C_NULL && isempty(Workqueue)
+            if c == 0 && eventloop() != C_NULL && isempty(W)
                 # if there are no active handles and no runnable tasks, just
                 # wait for signals.
                 pause()
             end
         else
-            reftask = poptask()
+            reftask = poptask(W)
             if reftask !== nothing
                 result = try_yieldto(ensure_rescheduled, reftask)
                 process_events(false)
