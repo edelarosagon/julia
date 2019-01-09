@@ -423,7 +423,7 @@ end
 function enq_work(t::Task)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
     ccall(:uv_stop, Cvoid, (Ptr{Cvoid},), eventloop())
-    push!(Workqueues[threadid()], t)
+    push!(Workqueues[Threads.threadid()], t)
     return t
 end
 
@@ -473,7 +473,7 @@ end
 # fast version of `schedule(t, arg); wait()`
 function schedule_and_wait(t::Task, @nospecialize(arg)=nothing)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
-    W = Workqueues[threadid()]
+    W = Workqueues[Threads.threadid()]
     if isempty(W)
         return yieldto(t, arg)
     else
@@ -543,7 +543,7 @@ end
 
 function ensure_rescheduled(othertask::Task)
     ct = current_task()
-    W = Workqueues[threadid()]
+    W = Workqueues[Threads.threadid()]
     if ct !== othertask && othertask.state == :runnable
         # we failed to yield to othertask
         # return it to the head of the queue to be scheduled later
@@ -571,7 +571,7 @@ end
 end
 
 function wait()
-    W = Workqueues[threadid()]
+    W = Workqueues[Threads.threadid()]
     while true
         if isempty(W)
             c = process_events(true)
