@@ -49,7 +49,7 @@ volatile int jl_in_stackwalk = 0;
 #endif
 #endif
 
-// empirically, finish_task needs about 64k stack space to infer/run
+// empirically, jl_finish_task needs about 64k stack space to infer/run
 // and additionally, gc-stack reserves 64k for the guard pages
 #if defined(MINSIGSTKSZ) && MINSIGSTKSZ > 131072
 #define MINSTKSZ MINSIGSTKSZ
@@ -101,6 +101,7 @@ static void NOINLINE save_stack(jl_ptls_t ptls, jl_task_t *lastt, jl_task_t **pt
     }
     *pt = lastt; // clear the gc-root for the target task before copying the stack for saving
     lastt->copy_stack = nb;
+    lastt->sticky = 1;
     memcpy_a16((uint64_t*)buf, (uint64_t*)frame_addr, nb);
     // this task's stack could have been modified after
     // it was marked by an incremental collection
@@ -140,7 +141,7 @@ static void restore_stack2(jl_ptls_t ptls, jl_task_t *lastt)
 static jl_function_t *task_done_hook_func = NULL;
 void jl_task_done_hook_partr(jl_task_t *task);
 
-static void JL_NORETURN finish_task(jl_task_t *t, jl_value_t *resultval JL_MAYBE_UNROOTED)
+void JL_NORETURN jl_finish_task(jl_task_t *t, jl_value_t *resultval JL_MAYBE_UNROOTED)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
     JL_SIGATOMIC_BEGIN();
@@ -248,6 +249,7 @@ static void ctx_switch(jl_ptls_t ptls, jl_task_t **pt)
 #ifdef COPY_STACKS
                 // fall back to stack copying if mmap fails
                 t->copy_stack = 1;
+                t->sticky = 1;
                 t->bufsz = 0;
                 memcpy(&t->ctx, &ptls->base_ctx, sizeof(t->ctx));
 #else
@@ -500,6 +502,17 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
 #endif
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&t->locks, 0);
+    t->parent = NULL;
+    /* reduction function entry point */
+    t->redentry = NULL;
+    /* parfor reduction result */
+    t->redresult = NULL;
+    t->arr = NULL;
+    t->red = NULL;
+    t->grain_num = -1;
+    //t->grain_start = -1;
+    //t->grain_end = -1;
+    t->prio = -1;
 #endif
 
 #if defined(JL_DEBUG_BUILD)
@@ -527,7 +540,7 @@ void jl_init_tasks(void) JL_GC_DISABLED
                         NULL,
                         jl_any_type,
                         jl_emptysvec,
-                        jl_perm_symsvec(10,
+                        jl_perm_symsvec(11,
                                         "next",
                                         "queue",
                                         "storage",
@@ -537,8 +550,9 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                         "exception",
                                         "backtrace",
                                         "logstate",
-                                        "code"),
-                        jl_svec(10,
+                                        "code",
+                                        "sticky"),
+                        jl_svec(11,
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type,
@@ -548,7 +562,8 @@ void jl_init_tasks(void) JL_GC_DISABLED
                                 jl_any_type,
                                 jl_any_type,
                                 jl_any_type,
-                                jl_any_type),
+                                jl_any_type,
+                                jl_bool_type),
                         0, 1, 9);
     jl_value_t *listt = jl_new_struct(jl_uniontype_type, jl_task_type, jl_void_type);
     jl_svecset(jl_task_type->types, 0, listt);
@@ -588,7 +603,7 @@ static void NOINLINE JL_NORETURN start_task(void)
         }
 skip_pop_exception:;
     }
-    finish_task(t, res);
+    jl_finish_task(t, res);
     gc_debug_critical_error();
     abort();
 }

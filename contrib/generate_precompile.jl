@@ -96,7 +96,7 @@ function generate_precompile_statements()
                         --compile=all --startup-file=no --color=yes
                         -e 'import REPL; REPL.Terminals.is_precompiling[] = true'
                         -i`,
-                        pty_slave, pty_slave, pty_slave; wait=false)
+                        pty_slave, pty_slave, stderr; wait=false)
                 readuntil(pty_master, "julia>", keep=true)
                 t = @async begin
                     while true

@@ -1589,8 +1589,10 @@ JL_DLLEXPORT void jl_sigatomic_end(void);
 
 // tasks and exceptions -------------------------------------------------------
 
-
+typedef struct _arriver_t arriver_t;
+typedef struct _reducer_t reducer_t;
 typedef struct _jl_timing_block_t jl_timing_block_t;
+
 // info describing an exception handler
 typedef struct _jl_handler_t {
     jl_jmp_buf eh_ctx;
@@ -1618,14 +1620,14 @@ typedef struct _jl_task_t {
     jl_value_t *backtrace;
     jl_value_t *logstate;
     jl_function_t *start;
+    uint8_t sticky; // record whether this Task can be migrated to a new thread
 
 // hidden state:
     jl_ucontext_t ctx; // saved thread state
     void *stkbuf; // malloc'd memory (either copybuf or stack)
     size_t bufsz; // actual sizeof stkbuf
-    unsigned int copy_stack; // sizeof stack for copybuf
+    unsigned int copy_stack:31; // sizeof stack for copybuf
     unsigned int started:1;
-    unsigned int sticky:1;
 
     // current exception handler
     jl_handler_t *eh;
@@ -1642,6 +1644,23 @@ typedef struct _jl_task_t {
 #ifdef JULIA_ENABLE_THREADING
     // This is statically initialized when the task is not holding any locks
     arraylist_t locks;
+//#ifdef JULIA_ENABLE_PARTR
+    /* parent (first) task of a parfor set */
+    struct _jl_task_t *parent;
+    /* reduction function entry point */
+    jl_function_t *redentry;
+    /* parfor reduction result */
+    jl_value_t *redresult;
+    /* the index of this task in the set of grains of a parfor */
+    int16_t grain_num;
+    ///* to synchronize/reduce grains of a parfor */
+    arriver_t *arr;
+    reducer_t *red;
+    /* tid of the thread to which this task is sticky */
+    int16_t sticky_tid;
+    /* for the multiqueue */
+    int16_t prio;
+//#endif
 #endif
     jl_timing_block_t *timing_stack;
 } jl_task_t;

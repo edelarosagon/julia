@@ -413,7 +413,7 @@ const StickyWorkqueue = InvasiveLinkedListSynchronized{Task}
 global const Workqueues = [StickyWorkqueue()]
 global const Workqueue = Workqueues[1] # default work queue is thread 1
 function init_tasks()
-    resize!(Workqueues, nthreads())
+    resize!(Workqueues, Threads.nthreads())
     for i = 2:length(Workqueues)
         Workqueues[i] = StickyWorkqueue()
     end
@@ -422,8 +422,12 @@ end
 
 function enq_work(t::Task)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
+    if t.sticky
+        push!(Workqueues[Threads.threadid()], t)
+    else
+        ccall(:jl_enqueue_task, Cvoid, (Any,), t)
+    end
     ccall(:uv_stop, Cvoid, (Ptr{Cvoid},), eventloop())
-    push!(Workqueues[Threads.threadid()], t)
     return t
 end
 
@@ -461,12 +465,12 @@ true
 """
 function schedule(t::Task, @nospecialize(arg); error=false)
     # schedule a task to be (re)started with the given value or exception
-    enq_work(t)
     if error
         t.exception = arg
     else
         t.result = arg
     end
+    enq_work(t)
     return t
 end
 
@@ -499,8 +503,8 @@ A fast, unfair-scheduling version of `schedule(t, arg); yield()` which
 immediately yields to `t` before calling the scheduler.
 """
 function yield(t::Task, @nospecialize(x=nothing))
-    enq_work(current_task())
     t.result = x
+    enq_work(current_task())
     return try_yieldto(ensure_rescheduled, Ref(t))
 end
 
@@ -556,7 +560,8 @@ function ensure_rescheduled(othertask::Task)
     nothing
 end
 
-@noinline function poptask(W::StickyWorkqueue)
+function trypoptask(W::StickyWorkqueue)
+    isempty(W) && return
     t = popfirst!(W)
     if t.state != :runnable
         # assume this somehow got queued twice,
@@ -567,30 +572,34 @@ end
             "\nWARNING: Workqueue inconsistency detected: popfirst!(Workqueue).state != :runnable\n")
         return
     end
-    return Ref(t)
+    return t
+end
+
+@noinline function poptaskref(W::StickyWorkqueue)
+    gettask = () -> trypoptask(W)
+    task = ccall(:jl_task_get_next, Any, (Any,), gettask)
+    ## Below is a reference implementation for `jl_task_get_next`, which currently lives in C
+    #while true
+    #    task = trypoptask(W)
+    #    task === nothing || break
+    #    if process_events(true) == 0
+    #        task = trypoptask(W)
+    #        task === nothing || break
+    #        # if there are no active handles and no runnable tasks, just
+    #        # wait for signals.
+    #        pause()
+    #    end
+    #end
+    return Ref(task)
 end
 
 function wait()
     W = Workqueues[Threads.threadid()]
-    while true
-        if isempty(W)
-            c = process_events(true)
-            if c == 0 && eventloop() != C_NULL && isempty(W)
-                # if there are no active handles and no runnable tasks, just
-                # wait for signals.
-                pause()
-            end
-        else
-            reftask = poptask(W)
-            if reftask !== nothing
-                result = try_yieldto(ensure_rescheduled, reftask)
-                process_events(false)
-                # return when we come out of the queue
-                return result
-            end
-        end
-    end
-    # unreachable
+    reftask = poptaskref(W)
+    result = try_yieldto(ensure_rescheduled, reftask)
+    process_events(false)
+    # return when we come out of the queue
+    return result
 end
 
 if Sys.iswindows()
