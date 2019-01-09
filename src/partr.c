@@ -180,150 +180,6 @@ static inline jl_task_t *multiq_deletemin(void)
 }
 
 
-// sync trees
-// ---
-
-/* arrival tree */
-struct _arriver_t {
-    int16_t index, next_avail;
-    int16_t **tree;
-};
-
-/* reduction tree */
-struct _reducer_t {
-    int16_t index, next_avail;
-    jl_value_t ***tree;
-};
-
-
-/* pool of arrival trees */
-static arriver_t *arriverpool;
-static int16_t num_arrivers, num_arriver_tree_nodes, next_arriver;
-
-/* pool of reduction trees */
-static reducer_t *reducerpool;
-static int16_t num_reducers, num_reducer_tree_nodes, next_reducer;
-
-
-/*  synctreepool_init()
- */
-static inline void synctreepool_init(void)
-{
-    num_arriver_tree_nodes = (GRAIN_K * jl_n_threads) - 1;
-    num_reducer_tree_nodes = (2 * GRAIN_K * jl_n_threads) - 1;
-
-    /* num_arrivers = ((GRAIN_K * jl_n_threads) ^ ARRIVERS_P) + 1 */
-    num_arrivers = GRAIN_K * jl_n_threads;
-    for (int i = 1; i < ARRIVERS_P; ++i)
-        num_arrivers = num_arrivers * num_arrivers;
-    ++num_arrivers;
-
-    num_reducers = num_arrivers * REDUCERS_FRAC;
-
-    /* allocate */
-    arriverpool = (arriver_t *)calloc(num_arrivers, sizeof (arriver_t));
-    next_arriver = 0;
-    for (int i = 0; i < num_arrivers; ++i) {
-        arriverpool[i].index = i;
-        arriverpool[i].next_avail = i + 1;
-        arriverpool[i].tree = (int16_t **)
-                jl_malloc_aligned(num_arriver_tree_nodes * sizeof (int16_t *), 64);
-        for (int j = 0; j < num_arriver_tree_nodes; ++j)
-            arriverpool[i].tree[j] = (int16_t *)jl_malloc_aligned(sizeof (int16_t), 64);
-    }
-    arriverpool[num_arrivers - 1].next_avail = -1;
-
-    reducerpool = (reducer_t *)calloc(num_reducers, sizeof (reducer_t));
-    next_reducer = 0;
-    for (int i = 0; i < num_reducers; ++i) {
-        reducerpool[i].index = i;
-        reducerpool[i].next_avail = i + 1;
-        reducerpool[i].tree = (jl_value_t ***)
-                jl_malloc_aligned(num_reducer_tree_nodes * sizeof (jl_value_t **), 64);
-        for (int j = 0; j < num_reducer_tree_nodes; ++j)
-            reducerpool[i].tree[j] = (jl_value_t **)jl_malloc_aligned(sizeof (jl_value_t *), 64);
-    }
-    if (num_reducers > 0)
-        reducerpool[num_reducers - 1].next_avail = -1;
-    else
-        next_reducer = -1;
-}
-
-
-/*  arriver_alloc()
- */
-static inline arriver_t *arriver_alloc(void)
-{
-    int16_t candidate;
-    arriver_t *arr;
-
-    do {
-        candidate = jl_atomic_load(&next_arriver);
-        if (candidate == -1)
-            return NULL;
-        arr = &arriverpool[candidate];
-    } while (!jl_atomic_bool_compare_exchange(&next_arriver,
-                candidate, arr->next_avail));
-    return arr;
-}
-
-
-/*  arriver_free()
- */
-static inline void arriver_free(arriver_t *arr)
-{
-    for (int i = 0; i < num_arriver_tree_nodes; ++i)
-        *arr->tree[i] = 0;
-
-    jl_atomic_exchange_generic(&next_arriver, &arr->index, &arr->next_avail);
-}
-
-
-/*  reducer_alloc()
- */
-static inline reducer_t *reducer_alloc(void)
-{
-    int16_t candidate;
-    reducer_t *red;
-
-    do {
-        candidate = jl_atomic_load(&next_reducer);
-        if (candidate == -1)
-            return NULL;
-        red = &reducerpool[candidate];
-    } while (!jl_atomic_bool_compare_exchange(&next_reducer,
-                     candidate, red->next_avail));
-    return red;
-}
-
-
-/*  reducer_free()
- */
-static inline void reducer_free(reducer_t *red)
-{
-    for (int i = 0; i < num_reducer_tree_nodes; ++i)
-        *red->tree[i] = 0;
-
-    jl_atomic_exchange_generic(&next_reducer, &red->index, &red->next_avail);
-}
-
-
-/*  last_arriver()
- */
-static inline int last_arriver(arriver_t *arr, int idx)
-{
-    int arrived, aidx = idx + (GRAIN_K * jl_n_threads) - 1;
-
-    while (aidx > 0) {
-        --aidx;
-        aidx >>= 1;
-        arrived = jl_atomic_fetch_add(arr->tree[aidx], 1);
-        if (!arrived) return 0;
-    }
-
-    return 1;
-}
-
 
 // parallel task runtime
 // ---
@@ -332,7 +188,6 @@ static inline int last_arriver(arriver_t *arr, int idx)
 void jl_init_threadinginfra(void)
 {
     /* initialize the synchronization trees pool and the multiqueue */
-    synctreepool_init();
     multiq_init();
 
     /* initialize the sleep mechanism */
@@ -383,76 +238,9 @@ JL_DLLEXPORT void jl_enqueue_task(jl_task_t *task)
     }
 }
 
-// FIXME: run the next available task
-static void run_next(void)
-{
-    jl_value_t *wait_func = jl_get_global(jl_base_module, jl_symbol("wait"));
-    jl_apply(&wait_func, 1);
-}
-static void enqueue_task(jl_task_t *task)
-{
-    jl_value_t *args[2] = {
-        jl_get_global(jl_base_module, jl_symbol("enq_work")),
-        task };
-    jl_apply(args, 2);
-}
-
-// parfor grains must synchronize/reduce as they end
-static void sync_grains(jl_task_t *task)
-{
-    int was_last = 0;
-
-    /* TODO kp: fix */
-    /* TODO kp: cascade exception(s) if any */
-
-    /* reduce... */
-    if (task->red) {
-        //task->result = reduce(task->arr, task->red, task->rfptr, task->mredfunc,
-        //                      task->rargs, task->result, task->grain_num);
-        jl_gc_wb(task, task->result);
-
-        /*  if this task is last, set the result in the parent task */
-        if (task->result) {
-            task->parent->redresult = task->result;
-            jl_gc_wb(task->parent, task->parent->redresult);
-            was_last = 1;
-        }
-    }
-    /* ... or just sync */
-    else {
-        if (last_arriver(task->arr, task->grain_num))
-            was_last = 1;
-    }
-
-    /* the last task to finish needs to finish up the loop */
-    if (was_last) {
-        /* a non-parent task must wake up the parent */
-        if (task->grain_num > 0)
-            enqueue_task(task->parent);
-
-        /* this is the parent task which was last; it can just end */
-        if (task->red)
-            reducer_free(task->red);
-        arriver_free(task->arr);
-    }
-    else {
-        /* the parent task needs to wait */
-        if (task->grain_num == 0) {
-            // run the next available task
-            run_next();
-            task->result = task->redresult;
-            jl_gc_wb(task, task->result);
-        }
-    }
-}
-
-
 // all tasks except the root task exit through here
 void jl_task_done_hook_partr(jl_task_t *task)
 {
-    /* grain tasks must synchronize */
-    if (task->grain_num >= 0)
-        sync_grains(task);
 }
 
 

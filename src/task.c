@@ -497,22 +497,12 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
     t->excstack = NULL;
     t->stkbuf = NULL;
     t->started = 0;
+    t->prio = -1;
 #ifdef ENABLE_TIMINGS
     t->timing_stack = NULL;
 #endif
 #ifdef JULIA_ENABLE_THREADING
     arraylist_new(&t->locks, 0);
-    t->parent = NULL;
-    /* reduction function entry point */
-    t->redentry = NULL;
-    /* parfor reduction result */
-    t->redresult = NULL;
-    t->arr = NULL;
-    t->red = NULL;
-    t->grain_num = -1;
-    //t->grain_start = -1;
-    //t->grain_end = -1;
-    t->prio = -1;
 #endif
 
 #if defined(JL_DEBUG_BUILD)

@@ -1589,8 +1589,6 @@ JL_DLLEXPORT void jl_sigatomic_end(void);
 
 // tasks and exceptions -------------------------------------------------------
 
-typedef struct _arriver_t arriver_t;
-typedef struct _reducer_t reducer_t;
 typedef struct _jl_timing_block_t jl_timing_block_t;
 
 // info describing an exception handler
@@ -1641,26 +1639,11 @@ typedef struct _jl_task_t {
     // id of owning thread
     // does not need to be defined until the task runs
     int16_t tid;
+    /* for the multiqueue */
+    int16_t prio;
 #ifdef JULIA_ENABLE_THREADING
     // This is statically initialized when the task is not holding any locks
     arraylist_t locks;
-//#ifdef JULIA_ENABLE_PARTR
-    /* parent (first) task of a parfor set */
-    struct _jl_task_t *parent;
-    /* reduction function entry point */
-    jl_function_t *redentry;
-    /* parfor reduction result */
-    jl_value_t *redresult;
-    /* the index of this task in the set of grains of a parfor */
-    int16_t grain_num;
-    ///* to synchronize/reduce grains of a parfor */
-    arriver_t *arr;
-    reducer_t *red;
-    /* tid of the thread to which this task is sticky */
-    int16_t sticky_tid;
-    /* for the multiqueue */
-    int16_t prio;
-//#endif
 #endif
     jl_timing_block_t *timing_stack;
 } jl_task_t;
