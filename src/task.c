@@ -943,6 +943,12 @@ JL_DLLEXPORT int jl_is_task_started(jl_task_t *t)
     return t->started;
 }
 
+JL_DLLEXPORT int16_t jl_get_task_tid(jl_task_t *t)
+{
+    return t->tid;
+}
+
+
 #ifdef _OS_WINDOWS_
 #if defined(_CPU_X86_)
 extern DWORD32 __readgsdword(int);

@@ -135,6 +135,8 @@ istaskstarted(t::Task) = ccall(:jl_is_task_started, Cint, (Any,), t) != 0
 
 istaskfailed(t::Task) = (t.state == :failed)
 
+Threads.threadid(t::Task) = Int(ccall(:jl_get_task_tid, Int16, (Any,), t)+1)
+
 task_result(t::Task) = t.result
 
 task_local_storage() = get_task_tls(current_task())
@@ -413,21 +415,29 @@ const StickyWorkqueue = InvasiveLinkedListSynchronized{Task}
 global const Workqueues = [StickyWorkqueue()]
 global const Workqueue = Workqueues[1] # default work queue is thread 1
 function init_tasks()
-    resize!(Workqueues, Threads.nthreads())
-    for i = 2:length(Workqueues)
-        Workqueues[i] = StickyWorkqueue()
+    if length(Workqueues) < Threads.nthreads()
+        lock(Workqueue.lock)
+        if length(Workqueues) < Threads.nthreads()
+            resize!(Workqueues, Threads.nthreads())
+            for i = 2:length(Workqueues)
+                Workqueues[i] = StickyWorkqueue()
+            end
+        end
+        unlock(Workqueue.lock)
     end
     nothing
 end
 
 function enq_work(t::Task)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
-    if t.sticky
-        push!(Workqueues[Threads.threadid()], t)
-    else
+    tid = (t.sticky ? Threads.threadid(t) : 0)
+    if tid == 0
         ccall(:jl_enqueue_task, Cvoid, (Any,), t)
+    else
+        init_tasks()
+        push!(Workqueues[tid], t)
     end
-    ccall(:uv_stop, Cvoid, (Ptr{Cvoid},), eventloop())
+    ccall(:jl_wakeup_thread, Cvoid, (Int16,), (tid - 1) % Int16)
     return t
 end
 
@@ -477,6 +487,7 @@ end
 # fast version of `schedule(t, arg); wait()`
 function schedule_and_wait(t::Task, @nospecialize(arg)=nothing)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
+    init_tasks()
     W = Workqueues[Threads.threadid()]
     if isempty(W)
         return yieldto(t, arg)
@@ -503,6 +514,7 @@ A fast, unfair-scheduling version of `schedule(t, arg); yield()` which
 immediately yields to `t` before calling the scheduler.
 """
 function yield(t::Task, @nospecialize(x=nothing))
+    init_tasks()
     t.result = x
     enq_work(current_task())
     return try_yieldto(ensure_rescheduled, Ref(t))
@@ -550,8 +562,10 @@ function ensure_rescheduled(othertask::Task)
     W = Workqueues[Threads.threadid()]
     if ct !== othertask && othertask.state == :runnable
         # we failed to yield to othertask
-        # return it to the head of the queue to be scheduled later
-        pushfirst!(W, othertask)
+        # return it to the head of a queue to be retried later
+        tid = Threads.threadid(othertask)
+        Wother = tid == 0 ? W : Workqueues[tid]
+        pushfirst!(Wother, othertask)
     end
     # if the current task was queued,
     # also need to return it to the runnable state
@@ -594,6 +608,7 @@ end
 end
 
 function wait()
+    init_tasks()
     W = Workqueues[Threads.threadid()]
     reftask = poptaskref(W)
     result = try_yieldto(ensure_rescheduled, reftask)

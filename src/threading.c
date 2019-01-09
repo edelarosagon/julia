@@ -426,6 +426,9 @@ void jl_init_threading(void)
 
     // initialize this thread (set tid, create heap, etc.)
     jl_init_threadtls(0);
+
+    // initialize threading infrastructure
+    jl_init_threadinginfra();
 }
 
 static uv_barrier_t thread_init_done;
@@ -457,9 +460,6 @@ void jl_start_threads(void)
         mask[0] = 0;
     }
 
-    // initialize threading infrastructure
-    jl_init_threadinginfra();
-
     // The analyzer doesn't know jl_n_threads doesn't change, help it
     size_t nthreads = jl_n_threads;
 
@@ -482,7 +482,46 @@ void jl_start_threads(void)
     uv_barrier_wait(&thread_init_done);
 }
 
-#else // !JULIA_ENABLE_THREADING
+#endif
+
+// simple fork/join mode code
+JL_DLLEXPORT void jl_threading_run(jl_value_t *func)
+{
+    jl_ptls_t ptls = jl_get_ptls_states();
+    int8_t gc_state = jl_gc_unsafe_enter(ptls);
+    size_t world = jl_world_counter;
+    jl_method_instance_t *mfunc = jl_lookup_generic(&func, 1, jl_int32hash_fast(jl_return_address()), world);
+    // Ignore constant return value for now.
+    jl_callptr_t fptr = jl_compile_method_internal(&mfunc, world);
+    if (fptr == jl_fptr_const_return)
+        return;
+
+    size_t nthreads = jl_n_threads;
+    jl_svec_t *ts = jl_alloc_svec(nthreads);
+    JL_GC_PUSH1(&ts);
+    jl_value_t *wait_func = jl_get_global(jl_base_module, jl_symbol("wait"));
+    jl_value_t *schd_func = jl_get_global(jl_base_module, jl_symbol("schedule"));
+    // create and schedule all tasks
+    for (int i = 0; i < nthreads; i++) {
+        jl_task_t *t = jl_new_task(func, 0);
+        jl_svecset(ts, i, t);
+        t->sticky = 1;
+        t->tid = i;
+        jl_value_t *args[2] = { schd_func, (jl_value_t*)t };
+        jl_apply(args, 2);
+    }
+    // join with all tasks
+    for (int i = 0; i < nthreads; i++) {
+        jl_value_t *t = jl_svecref(ts, i);
+        jl_value_t *args[2] = { wait_func, t };
+        jl_apply(args, 2);
+    }
+    JL_GC_POP();
+    jl_gc_unsafe_leave(ptls, gc_state);
+}
+
+
+#ifndef JULIA_ENABLE_THREADING
 
 void jl_init_threading(void)
 {

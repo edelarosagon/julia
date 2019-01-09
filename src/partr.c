@@ -17,7 +17,6 @@ extern "C" {
 #define JULIA_ENABLE_PARTR
 
 #ifdef JULIA_ENABLE_THREADING
-#ifdef JULIA_ENABLE_PARTR
 
 // GC functions used
 extern int jl_gc_mark_queue_obj_explicit(jl_gc_mark_cache_t *gc_cache,
@@ -63,7 +62,7 @@ static inline void multiq_init(void)
     heaps = (taskheap_t *)calloc(heap_p, sizeof(taskheap_t));
     for (int16_t i = 0; i < heap_p; ++i) {
         jl_mutex_init(&heaps[i].lock);
-        heaps[i].tasks = (jl_task_t **)calloc(tasks_per_heap, sizeof(jl_task_t *));
+        heaps[i].tasks = (jl_task_t **)calloc(tasks_per_heap, sizeof(jl_task_t*));
         heaps[i].ntasks = 0;
         heaps[i].prio = INT16_MAX;
     }
@@ -209,10 +208,6 @@ void jl_threadfun(void *arg)
     jl_init_stack_limits(0, &stack_lo, &stack_hi);
     jl_init_root_task(stack_lo, stack_hi);
 
-    // Assuming the functions called below don't contain unprotected GC
-    // critical region. In general, the following part of this function
-    // shouldn't call any managed code without calling `jl_gc_unsafe_enter`
-    // first.
     jl_ptls_t ptls = jl_get_ptls_states();
     jl_gc_state_set(ptls, JL_GC_STATE_SAFE, 0);
     uv_barrier_wait(targ->barrier);
@@ -220,8 +215,23 @@ void jl_threadfun(void *arg)
     // free the thread argument here
     free(targ);
 
+    (void)jl_gc_unsafe_enter(ptls);
     jl_current_task->exception = jl_nothing;
     jl_finish_task(jl_current_task, jl_nothing); // noreturn
+}
+
+JL_DLLEXPORT void jl_wakeup_thread(int16_t tid)
+{
+    /* wake up thread tid */
+    if (jl_thread_sleep_threshold) {
+        uv_mutex_lock(&sleep_lock);
+        uv_cond_broadcast(&sleep_alarm); // TODO: make this uv_cond_signal / just wake up correct thread
+        uv_mutex_unlock(&sleep_lock);
+    }
+
+    /* stop the event loop too, if alerting thread 1 */
+    if (tid == 0 || tid == -1)
+        uv_stop(jl_global_event_loop());
 }
 
 
@@ -229,13 +239,6 @@ void jl_threadfun(void *arg)
 JL_DLLEXPORT void jl_enqueue_task(jl_task_t *task)
 {
     multiq_insert(task, task->prio);
-
-    /* wake up threads */
-    if (jl_thread_sleep_threshold) {
-        uv_mutex_lock(&sleep_lock);
-        uv_cond_broadcast(&sleep_alarm); // TODO: make this uv_cond_signal (unless sticky)
-        uv_mutex_unlock(&sleep_lock);
-    }
 }
 
 // all tasks except the root task exit through here
@@ -290,8 +293,10 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *getsticky)
                         }
                         // other threads just sleep
                         else {
+                            int8_t gc_state = jl_gc_safe_enter(ptls);
                             uv_cond_wait(&sleep_alarm, &sleep_lock);
                             uv_mutex_unlock(&sleep_lock);
+                            jl_gc_safe_leave(ptls, gc_state);
                         }
                     }
                     else {
@@ -315,11 +320,6 @@ void jl_gc_mark_enqueued_tasks(jl_gc_mark_cache_t *gc_cache, jl_gc_mark_sp_t *sp
             jl_gc_mark_queue_obj_explicit(gc_cache, sp, (jl_value_t *)heaps[i].tasks[j]);
 }
 
-#else
-void jl_init_threadinginfra(void) { }
-void jl_threadfun(void *arg) { abort(); }
-void jl_task_done_hook_partr(jl_task_t *task) { }
-#endif
 #endif // JULIA_ENABLE_THREADING
 
 #ifdef __cplusplus
