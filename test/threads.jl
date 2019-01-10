@@ -401,41 +401,6 @@ for period in (0.06, Dates.Millisecond(60))
     end
 end
 
-function test_thread_cfunction()
-    # ensure a runtime call to `get_trampoline` will be created
-    # TODO: get_trampoline is not thread-safe (as this test shows)
-    function complex_cfunction(a)
-        s = zero(eltype(a))
-        @inbounds @simd for i in a
-            s += muladd(a[i], a[i], -2)
-        end
-        return s
-    end
-    fs = [ let a = zeros(10)
-            () -> complex_cfunction(a)
-        end for i in 1:1000 ]
-    @noinline cf(f) = @cfunction $f Float64 ()
-    cfs = Vector{Base.CFunction}(undef, length(fs))
-    cf1 = cf(fs[1])
-    @threads for i in 1:1000
-        cfs[i] = cf(fs[i])
-    end
-    @test cfs[1] == cf1
-    @test cfs[2] == cf(fs[2])
-    @test length(unique(cfs)) == 1000
-    ok = zeros(Int, nthreads())
-    @threads for i in 1:10000
-        i = mod1(i, 1000)
-        fi = fs[i]
-        cfi = cf(fi)
-        GC.@preserve cfi begin
-            ok[threadid()] += (cfi === cfs[i])
-        end
-    end
-    @test sum(ok) == 10000
-end
-test_thread_cfunction()
-
 # Compare the two ways of checking if threading is enabled.
 # `jl_tls_states` should only be defined on non-threading build.
 if ccall(:jl_threading_enabled, Cint, ()) == 0

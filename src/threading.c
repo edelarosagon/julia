@@ -503,12 +503,16 @@ JL_DLLEXPORT void jl_threading_run(jl_value_t *func)
     jl_value_t *schd_func = jl_get_global(jl_base_module, jl_symbol("schedule"));
     // create and schedule all tasks
     for (int i = 0; i < nthreads; i++) {
-        jl_task_t *t = jl_new_task(func, jl_nothing, 0);
+        jl_value_t *args2[2];
+        args2[0] = (jl_value_t*)jl_task_type;
+        args2[1] = func;
+        jl_task_t *t = (jl_task_t*)jl_apply(args2, 2);
         jl_svecset(ts, i, t);
         t->sticky = 1;
         t->tid = i;
-        jl_value_t *args[2] = { schd_func, (jl_value_t*)t };
-        jl_apply(args, 2);
+        args2[0] = schd_func;
+        args2[1] = (jl_value_t*)t;
+        jl_apply(args2, 2);
     }
     // join with all tasks
     for (int i = 0; i < nthreads; i++) {
