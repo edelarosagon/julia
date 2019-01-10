@@ -454,7 +454,7 @@ JL_DLLEXPORT void jl_rethrow_other(jl_value_t *e JL_MAYBE_UNROOTED)
     throw_internal(NULL);
 }
 
-JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
+JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, jl_value_t *completion_future, size_t ssize)
 {
     jl_ptls_t ptls = jl_get_ptls_states();
     jl_task_t *t = (jl_task_t*)jl_gc_alloc(ptls, sizeof(jl_task_t), jl_task_type);
@@ -483,7 +483,7 @@ JL_DLLEXPORT jl_task_t *jl_new_task(jl_function_t *start, size_t ssize)
     t->state = runnable_sym;
     t->start = start;
     t->result = jl_nothing;
-    t->donenotify = jl_nothing;
+    t->donenotify = completion_future;
     t->exception = jl_nothing;
     t->backtrace = jl_nothing;
     // Inherit logger state from parent task

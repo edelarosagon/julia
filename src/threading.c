@@ -503,7 +503,7 @@ JL_DLLEXPORT void jl_threading_run(jl_value_t *func)
     jl_value_t *schd_func = jl_get_global(jl_base_module, jl_symbol("schedule"));
     // create and schedule all tasks
     for (int i = 0; i < nthreads; i++) {
-        jl_task_t *t = jl_new_task(func, 0);
+        jl_task_t *t = jl_new_task(func, jl_nothing, 0);
         jl_svecset(ts, i, t);
         t->sticky = 1;
         t->tid = i;

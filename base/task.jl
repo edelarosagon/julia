@@ -2,6 +2,8 @@
 
 ## basic task functions and TLS
 
+Core.Task(@nospecialize(f), reserved_stack::Int=0) = Task(f, reserved_stack, GenericCondition{Threads.SpinLock}())
+
 # Container for a captured exception and its backtrace. Can be serialized.
 struct CapturedException <: Exception
     ex::Any
@@ -183,11 +185,6 @@ end
 # NOTE: you can only wait for scheduled tasks
 function wait(t::Task)
     if !istaskdone(t)
-        if t.donenotify === nothing
-            # TODO: needs atomic_cas, or a lock
-            # TODO: should this use the StickyWorkqueue type instead (same fields, different API)?
-            t.donenotify = GenericCondition{Threads.SpinLock}()
-        end
         lock(t.donenotify)
         try
             while !istaskdone(t)
@@ -430,16 +427,12 @@ end
 const StickyWorkqueue = InvasiveLinkedListSynchronized{Task}
 global const Workqueues = [StickyWorkqueue()]
 global const Workqueue = Workqueues[1] # default work queue is thread 1
-function init_tasks()
+function __preinit_threads__()
     if length(Workqueues) < Threads.nthreads()
-        lock(Workqueue.lock) # FIXME: need to kill this lock
-        if length(Workqueues) < Threads.nthreads()
-            resize!(Workqueues, Threads.nthreads())
-            for i = 2:length(Workqueues)
-                Workqueues[i] = StickyWorkqueue()
-            end
+        resize!(Workqueues, Threads.nthreads())
+        for i = 2:length(Workqueues)
+            Workqueues[i] = StickyWorkqueue()
         end
-        unlock(Workqueue.lock)
     end
     nothing
 end
@@ -450,7 +443,6 @@ function enq_work(t::Task)
     if tid == 0
         ccall(:jl_enqueue_task, Cvoid, (Any,), t)
     else
-        init_tasks()
         push!(Workqueues[tid], t)
     end
     ccall(:jl_wakeup_thread, Cvoid, (Int16,), (tid - 1) % Int16)
@@ -503,7 +495,6 @@ end
 # fast version of `schedule(t, arg); wait()`
 function schedule_and_wait(t::Task, @nospecialize(arg)=nothing)
     (t.state == :runnable && t.queue === nothing) || error("schedule: Task not runnable")
-    init_tasks()
     W = Workqueues[Threads.threadid()]
     if isempty(W)
         return yieldto(t, arg)
@@ -530,7 +521,6 @@ A fast, unfair-scheduling version of `schedule(t, arg); yield()` which
 immediately yields to `t` before calling the scheduler.
 """
 function yield(t::Task, @nospecialize(x=nothing))
-    init_tasks()
     t.result = x
     enq_work(current_task())
     return try_yieldto(ensure_rescheduled, Ref(t))
@@ -624,7 +614,6 @@ end
 end
 
 function wait()
-    init_tasks()
     W = Workqueues[Threads.threadid()]
     reftask = poptaskref(W)
     result = try_yieldto(ensure_rescheduled, reftask)
